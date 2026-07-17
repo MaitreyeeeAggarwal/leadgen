@@ -202,14 +202,18 @@ async def main():
 
     # Load existing leads for deduplication
     existing_leads = set()
-    if os.path.exists(output_csv):
+    if os.path.exists(output_csv) and os.path.getsize(output_csv) > 0:
         try:
-            df_old = pd.read_csv(output_csv)
-            for _, row in df_old.iterrows():
-                name = str(row.get("Business Name", "")).strip().lower()
-                phone = str(row.get("Phone Number", "")).strip().lower()
-                if name:
-                    existing_leads.add((name, phone))
+            with open(output_csv, mode="r", encoding="utf-8-sig") as f:
+                reader = csv.DictReader(f)
+                for row in reader:
+                    name = str(row.get("Business Name", "")).strip().lower()
+                    phone = str(row.get("Phone Number", "")).strip().lower()
+                    # Clean up phone number if it got read with .0 at the end from previous corrupted runs
+                    if phone.endswith(".0"):
+                        phone = phone[:-2]
+                    if name:
+                        existing_leads.add((name, phone))
             print(f"Loaded {len(existing_leads)} existing leads from '{output_csv}' for deduplication.")
         except Exception as e:
             print(f"Could not load existing file: {e}. Starting fresh.")
@@ -287,38 +291,38 @@ async def main():
                         item["Email"] = "NOT_FOUND"
                         print("    => Email NOT_FOUND")
                 
-                new_leads.append(item)
                 existing_leads.add(key)
                 
-                # Save CSV (with retries for PermissionError if locked by Excel)
-                # Before saving, clean up CSV columns (drop address and Google Maps links)
-                df_new = pd.DataFrame(new_leads)
-                
-                # Remove requested columns
+                # Clean up and append row to CSV
                 cols_to_drop = ["Address Line 1", "Address Line 2", "Google Maps Link"]
-                df_new_cleaned = df_new.drop(columns=[col for col in cols_to_drop if col in df_new.columns], errors="ignore")
+                cleaned_lead = {k: v for k, v in item.items() if k not in cols_to_drop}
                 
-                if os.path.exists(output_csv):
-                    try:
-                        df_old = pd.read_csv(output_csv)
-                        df_final = pd.concat([df_old, df_new_cleaned], ignore_index=True)
-                    except Exception:
-                        df_final = df_new_cleaned
-                else:
-                    df_final = df_new_cleaned
-                    
-                # Save to output file
+                fieldnames = ["Business Name", "Phone Number", "Website", "Industry", "Rating", "Review Count", "Email"]
+                row_data = {field: str(cleaned_lead.get(field, "")).strip() for field in fieldnames}
+                
+                # Clean up rating/review count float strings if nan
+                if row_data["Rating"] in ("nan", "None"):
+                    row_data["Rating"] = ""
+                if row_data["Review Count"] in ("nan", "None"):
+                    row_data["Review Count"] = ""
+                
+                file_exists = os.path.exists(output_csv) and os.path.getsize(output_csv) > 0
+                
+                # Save to output file with retries for PermissionError
                 for attempt in range(20):
                     try:
-                        df_final.to_csv(output_csv, index=False, encoding="utf-8-sig")
+                        with open(output_csv, mode="a", newline="", encoding="utf-8-sig") as f:
+                            writer = csv.DictWriter(f, fieldnames=fieldnames)
+                            if not file_exists:
+                                writer.writeheader()
+                                file_exists = True
+                            writer.writerow(row_data)
                         break
                     except PermissionError:
                         if attempt == 0:
                             print(f"\n[Warning] Permission denied writing to '{output_csv}'. Is the file open in Excel? Please close it to save. Retrying every 3s...")
                         await asyncio.sleep(3)
                         
-                # Clear incremental list for next iteration
-                new_leads = []
                 await asyncio.sleep(1)
                 
         print(f"Region '{region}' complete. Leads appended directly to '{output_csv}'.")

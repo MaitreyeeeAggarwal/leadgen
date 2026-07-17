@@ -58,31 +58,54 @@ async def scrape_query_stealth(page, query):
     # Get all direct result links
     links_locator = page.locator('a[href*="/maps/place/"]')
     count = await links_locator.count()
-    print(f"Found {count} listing links in the sidebar.")
+    
+    # Collect unique URLs
+    urls = []
+    seen = set()
+    for i in range(count):
+        href = await links_locator.nth(i).get_attribute("href") or ""
+        # Deduplicate using the base URL path (before "/data=")
+        base_url = href.split("/data=")[0] if "/data=" in href else href
+        if base_url and base_url not in seen:
+            seen.add(base_url)
+            urls.append(href)
+            
+    print(f"Found {len(urls)} unique listing links in the sidebar.")
     
     results = []
     
-    for i in range(count):
-        # Locate the link element
-        link = links_locator.nth(i)
-        url = await link.get_attribute("href") or ""
-        
+    for idx, url in enumerate(urls):
         try:
-            # Scroll and click
-            await link.scroll_into_view_if_needed()
-            await link.click()
-            # Wait for detail card to open and populate
-            await page.wait_for_timeout(1500)
+            # Locate the link element in JS to avoid CSS escaping issues
+            element_handle = await page.evaluate_handle(
+                """(targetUrl) => {
+                    const links = document.querySelectorAll('a[href*="/maps/place/"]');
+                    for (const link of links) {
+                        const href = link.getAttribute('href') || link.href;
+                        if (href === targetUrl) {
+                            return link;
+                        }
+                    }
+                    return null;
+                }""",
+                url
+            )
             
-            # Parse detail panel
-            details = await parse_current_detail_panel(page, url)
-            if details["Business Name"]:
-                results.append(details)
-                print(f"[{i+1}/{count}] Scraped: {details['Business Name']} | Phone: {details['Phone Number']} | Web: {details['Website']}")
+            element = element_handle.as_element()
+            if element:
+                await element.scroll_into_view_if_needed()
+                await element.click()
+                await page.wait_for_timeout(1500)
+                
+                # Parse detail panel
+                details = await parse_current_detail_panel(page, url)
+                if details["Business Name"]:
+                    results.append(details)
+                    print(f"[{idx+1}/{len(urls)}] Scraped: {details['Business Name']} | Phone: {details['Phone Number']} | Web: {details['Website']}")
+            else:
+                print(f"[{idx+1}/{len(urls)}] Warning: Element handle not found for {url}")
         except Exception as e:
-            print(f"Error scraping listing index {i}: {e}")
-            # Refresh locator references in case DOM re-rendered
-            links_locator = page.locator('a[href*="/maps/place/"]')
+            print(f"[{idx+1}/{len(urls)}] Error scraping listing: {e}")
             
     return results
 
