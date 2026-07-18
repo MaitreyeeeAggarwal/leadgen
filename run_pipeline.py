@@ -193,10 +193,30 @@ async def main():
     if not api_key:
         print("[Warning] NVIDIA_API_KEY is not configured in ~/.env. The pipeline will fall back to website scraping only, without AI lookups.")
 
-    # 1. Generate Sub-regions
+    # 1. Check for checkpoint file to resume
+    checkpoint_file = f"{os.path.splitext(output_csv)[0]}_checkpoint.json"
+    regions = []
+    completed_regions = set()
+    
+    if os.path.exists(checkpoint_file):
+        try:
+            with open(checkpoint_file, "r", encoding="utf-8") as f:
+                checkpoint = json.load(f)
+                if (checkpoint.get("query_type") == query_type and 
+                    checkpoint.get("country") == country and
+                    checkpoint.get("filter_keywords") == filter_keywords):
+                    regions = checkpoint.get("regions", [])
+                    completed_regions = set(checkpoint.get("completed_regions", []))
+                    print(f"\n[Info] Found checkpoint for '{output_csv}'. Resuming run.")
+                    print(f"[Info] {len(completed_regions)} of {len(regions)} regions already completed.\n")
+        except Exception as e:
+            print(f"[Warning] Error loading checkpoint: {e}. Starting fresh.")
+            
     limits = httpx.Limits(max_keepalive_connections=10, max_connections=20)
-    async with httpx.AsyncClient(limits=limits) as client:
-        regions = await generate_regions_async(client, country)
+    if not regions:
+        # Generate Sub-regions
+        async with httpx.AsyncClient(limits=limits) as client:
+            regions = await generate_regions_async(client, country)
         
     print(f"\nBeginning pipeline for {len(regions)} regions in {country}...\n")
 
@@ -220,6 +240,10 @@ async def main():
 
     # Loop through each sub-region
     for r_idx, region in enumerate(regions):
+        if region in completed_regions:
+            print(f"Skipping completed region [{r_idx+1}/{len(regions)}]: {region}")
+            continue
+            
         print(f"\n====================================================")
         print(f" [{r_idx+1}/{len(regions)}] REGION: {region}")
         print(f"====================================================")
@@ -327,7 +351,28 @@ async def main():
                 
         print(f"Region '{region}' complete. Leads appended directly to '{output_csv}'.")
         
+        # Save checkpoint progress
+        completed_regions.add(region)
+        try:
+            with open(checkpoint_file, "w", encoding="utf-8") as f:
+                json.dump({
+                    "query_type": query_type,
+                    "country": country,
+                    "filter_keywords": filter_keywords,
+                    "regions": regions,
+                    "completed_regions": list(completed_regions)
+                }, f, indent=4)
+        except Exception as e:
+            print(f"[Warning] Could not save checkpoint: {e}")
+        
     print(f"\nPipeline complete! Output saved to '{output_csv}'.")
+    
+    # Remove checkpoint file upon successful completion
+    if os.path.exists(checkpoint_file):
+        try:
+            os.remove(checkpoint_file)
+        except Exception as e:
+            print(f"[Warning] Could not remove checkpoint file: {e}")
 
 if __name__ == "__main__":
     asyncio.run(main())

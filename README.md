@@ -19,20 +19,86 @@ An end-to-end automated pipeline to scrape business listings from Google Maps, f
 
 ## Installation & Setup
 
-### 1. Prerequisites
-Ensure you have **Python 3.10+** installed on your system.
+### 🪟 Windows Setup (For Systems Without Python)
 
-### 2. Install Dependencies
-Run the following command to install the required Python libraries:
-```bash
-pip install playwright beautifulsoup4 pandas httpx requests
+If you are on a fresh Windows machine, open **PowerShell** and run these commands step-by-step:
+
+1. **Install Python 3.11** using Windows Package Manager (Winget):
+   ```powershell
+   winget install -e --id Python.Python.3.11 --accept-package-agreements --accept-source-agreements
+   ```
+   > [!IMPORTANT]
+   > Close your current PowerShell window and open a new one so that Windows recognizes the newly installed `python` command.
+
+2. **Navigate to the scraper directory**:
+   ```powershell
+   cd path/to/australia_accountants_scraper
+   ```
+   *(Replace `path/to/...` with the actual folder path where you downloaded the repository.)*
+
+3. **Create a virtual environment**:
+   ```powershell
+   python -m venv .venv
+   ```
+
+4. **Activate the virtual environment**:
+   ```powershell
+   .venv\Scripts\Activate.ps1
+   ```
+   > [!NOTE]
+   > If you get an execution policy error, run `Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope Process` first, then run the activation command again.
+
+5. **Install Python dependencies** listed in [requirements.txt](file:///c:/Users/maitr/.gemini/antigravity-ide/scratch/australia_accountants_scraper/requirements.txt):
+   ```powershell
+   pip install -r requirements.txt
+   ```
+
+6. **Install the Playwright browser executable**:
+   ```powershell
+   playwright install chromium
+   ```
+
+7. **Run the lead scraper pipeline**:
+   ```powershell
+   python run_pipeline.py
+   ```
+
+---
+
+### 🚀 Zero-Setup Master Prompt (For AI Chatbots)
+
+If you prefer to have an AI assistant (like Gemini, ChatGPT, or Claude) walk you through the process, copy and paste this master prompt:
+
+```text
+I want to run a Python lead scraper project on my machine, but my system is brand new and does not have Python installed. 
+
+My Operating System is: Windows 11
+
+Please write a step-by-step guide and an automated shell script for my system to:
+1. Check if Python 3.10+ is installed, and if not, install the latest Python 3.10+ (using Winget).
+2. Help me open the terminal/PowerShell and navigate to the project directory.
+3. Create a Python virtual environment (`.venv`) and activate it.
+4. Install these python dependencies: playwright, beautifulsoup4, pandas, httpx, requests.
+5. Run `playwright install chromium`.
+
+Please explain clearly how to open the terminal, run the commands, and verify that everything is working.
 ```
 
-### 3. Install Playwright Web Browser
-Run the Playwright installer to download the Chromium browser executable:
-```bash
-playwright install chromium
-```
+---
+
+### 💻 macOS & Linux Setup
+
+If you already have Python 3.10+ installed and prefer doing it manually:
+
+1. **Install Dependencies** listed in [requirements.txt](file:///c:/Users/maitr/.gemini/antigravity-ide/scratch/australia_accountants_scraper/requirements.txt):
+   ```bash
+   pip install -r requirements.txt
+   ```
+
+2. **Install Playwright Web Browser**:
+   ```bash
+   playwright install chromium
+   ```
 
 ---
 
