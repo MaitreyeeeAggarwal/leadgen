@@ -182,6 +182,8 @@ async def main():
     output_csv = input("Enter output CSV file name [default: scraped_leads.csv]: ").strip()
     if not output_csv:
         output_csv = "scraped_leads.csv"
+    elif not output_csv.endswith(".csv"):
+        output_csv += ".csv"
         
     print("\n----------------------------------------------------")
     print(f"Company Type:    {query_type}")
