@@ -143,7 +143,9 @@ The AI fallback email search uses the `nvidia/nemotron-3-nano-omni-30b-a3b-reaso
    Enter the country to search in (e.g. Australia): Australia
    Enter comma-separated keywords to filter categories (or press Enter to skip filtering): dentist, dental
    Enter output CSV file name [default: scraped_leads.csv]: scraped_dentists.csv
-   ```
+    ```
+   > [!IMPORTANT]
+   > **Category Filter Keywords Warning**: Always use **singular** keywords (e.g., `broker`, `dentist`, `finance`) rather than plural words (`brokers`, `dentists`). Since Google Maps categories are singular (e.g., `"Finance broker"`), using a plural keyword will filter out 100% of the leads, resulting in an empty output file. Alternatively, press **Enter** to skip filtering.
 
 ---
 
@@ -168,3 +170,7 @@ The AI fallback email search uses the `nvidia/nemotron-3-nano-omni-30b-a3b-reaso
 ### 3. AI Emails output `NOT_FOUND` or are skipped
 * **Cause**: If the console displays `NVIDIA_API_KEY is not configured`, the script will bypass AI enrichment and save `NOT_FOUND` where crawling fails. 
 * **Solution**: Follow the API Key configuration steps above to set your key.
+
+### 4. Zero leads are saved / Output file is empty (1KB)
+* **Cause**: Your category filter keywords (e.g., `Brokers`, `Dentists`) are too specific or plural. Google Maps uses singular categories (e.g., `"Finance broker"`, `"Dentist"`). Because `"brokers"` does not match `"finance broker"`, all leads are filtered out.
+* **Solution**: Re-run the script using singular keywords (e.g., `broker`, `dentist`, `finance`) or leave the category filter blank (press Enter) to scrape everything and filter manually later.
