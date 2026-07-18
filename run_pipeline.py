@@ -240,41 +240,60 @@ async def main():
         except Exception as e:
             print(f"Could not load existing file: {e}. Starting fresh.")
 
-    # Loop through each sub-region
-    for r_idx, region in enumerate(regions):
-        if region in completed_regions:
-            print(f"Skipping completed region [{r_idx+1}/{len(regions)}]: {region}")
-            continue
+    # Create queue and lock for concurrent processing
+    enrichment_queue = asyncio.Queue(maxsize=100)
+    csv_lock = asyncio.Lock()
+
+    async def scraper_task_worker():
+        """Scrapes Google Maps regions, filters them, writes them immediately to CSV (empty email), and enqueues them."""
+        fieldnames = ["Business Name", "Phone Number", "Website", "Industry", "Rating", "Review Count", "Email"]
+        
+        for r_idx, region in enumerate(regions):
+            if region in completed_regions:
+                print(f"Skipping completed region [{r_idx+1}/{len(regions)}]: {region}")
+                continue
+                
+            print(f"\n====================================================")
+            print(f" [{r_idx+1}/{len(regions)}] REGION: {region}")
+            print(f"====================================================")
             
-        print(f"\n====================================================")
-        print(f" [{r_idx+1}/{len(regions)}] REGION: {region}")
-        print(f"====================================================")
-        
-        search_query = f"{query_type} in {region}"
-        
-        # 2. Start Google Maps Scraper for this region
-        print(f"Step 1: Scraping Google Maps for '{search_query}'...")
-        async with async_playwright() as p:
-            browser = await p.chromium.launch(
-                headless=True,
-                args=["--disable-gpu", "--no-sandbox"]
-            )
-            context = await browser.new_page()
-            raw_listings = await scrape_query_stealth(context, search_query)
-            await browser.close()
+            search_query = f"{query_type} in {region}"
             
-        if not raw_listings:
-            print(f"No listings found on Google Maps for '{region}'. Moving to next region.")
-            continue
+            print(f"Step 1: Scraping Google Maps for '{search_query}'...")
+            try:
+                async with async_playwright() as p:
+                    browser = await p.chromium.launch(
+                        headless=True,
+                        args=["--disable-gpu", "--no-sandbox"]
+                    )
+                    context = await browser.new_page()
+                    raw_listings = await scrape_query_stealth(context, search_query)
+                    await browser.close()
+            except Exception as e:
+                print(f"Error scraping region '{region}': {e}")
+                raw_listings = []
+                
+            if not raw_listings:
+                print(f"No listings found on Google Maps for '{region}'. Moving to next region.")
+                # Save checkpoint progress so we skip this region next time
+                completed_regions.add(region)
+                try:
+                    with open(checkpoint_file, "w", encoding="utf-8") as f:
+                        json.dump({
+                            "query_type": query_type,
+                            "country": country,
+                            "filter_keywords": filter_keywords,
+                            "regions": regions,
+                            "completed_regions": list(completed_regions)
+                        }, f, indent=4)
+                except Exception as e:
+                    print(f"[Warning] Could not save checkpoint: {e}")
+                continue
+                
+            print(f"Scraped {len(raw_listings)} raw listings in '{region}'.")
+            print(f"Step 2: Filtering leads and writing to CSV in real-time...")
             
-        print(f"Scraped {len(raw_listings)} raw listings in '{region}'.")
-        
-        # 3. Filter & Enrich Listings
-        print(f"Step 2: Filtering and Enriching leads in '{region}'...")
-        
-        new_leads = []
-        
-        async with httpx.AsyncClient(limits=limits) as client:
+            # Write leads immediately to CSV (with empty email) and enqueue them
             for idx, item in enumerate(raw_listings):
                 name = item.get("Business Name", "")
                 phone = item.get("Phone Number", "")
@@ -291,81 +310,157 @@ async def main():
                     category_lower = category.lower()
                     if not any(kw in category_lower for kw in filter_keywords):
                         continue
-                        
-                print(f"  [{idx+1}/{len(raw_listings)}] Processing: '{name}'")
                 
-                # Crawl Website First
-                emails_found = []
-                if website and pd.notna(website):
-                    emails_found = await scrape_emails_for_site(client, website)
-                    
-                if emails_found:
-                    item["Email"] = emails_found[0]
-                    print(f"    => Found Email via crawl: {emails_found[0]}")
-                else:
-                    # Fallback to AI Nemotron
-                    # Construct address from memory (critical context for AI)
-                    addr1 = str(item.get("Address Line 1", "")) if pd.notna(item.get("Address Line 1")) else ""
-                    addr2 = str(item.get("Address Line 2", "")) if pd.notna(item.get("Address Line 2")) else ""
-                    address = f"{addr1} {addr2}".strip()
-                    
-                    ai_email = await query_nemotron_async(client, name, website, phone, address)
-                    if ai_email and ai_email != "NOT_FOUND":
-                        item["Email"] = ai_email
-                        print(f"    => Inferred Email via AI: {ai_email}")
-                    else:
-                        item["Email"] = "NOT_FOUND"
-                        print("    => Email NOT_FOUND")
-                
-                existing_leads.add(key)
-                
-                # Clean up and append row to CSV
+                # Prepare row data with empty email
                 cols_to_drop = ["Address Line 1", "Address Line 2", "Google Maps Link"]
                 cleaned_lead = {k: v for k, v in item.items() if k not in cols_to_drop}
+                cleaned_lead["Email"] = ""
                 
-                fieldnames = ["Business Name", "Phone Number", "Website", "Industry", "Rating", "Review Count", "Email"]
                 row_data = {field: str(cleaned_lead.get(field, "")).strip() for field in fieldnames}
-                
-                # Clean up rating/review count float strings if nan
                 if row_data["Rating"] in ("nan", "None"):
                     row_data["Rating"] = ""
                 if row_data["Review Count"] in ("nan", "None"):
                     row_data["Review Count"] = ""
+                    
+                # Write immediately to CSV using the lock
+                async with csv_lock:
+                    file_exists = os.path.exists(output_csv) and os.path.getsize(output_csv) > 0
+                    for attempt in range(20):
+                        try:
+                            with open(output_csv, mode="a", newline="", encoding="utf-8-sig") as f:
+                                writer = csv.DictWriter(f, fieldnames=fieldnames)
+                                if not file_exists:
+                                    writer.writeheader()
+                                    file_exists = True
+                                writer.writerow(row_data)
+                            break
+                        except PermissionError:
+                            if attempt == 0:
+                                print(f"[Warning] Permission denied writing to '{output_csv}'. Is it open in Excel? Retrying...")
+                            await asyncio.sleep(3)
                 
-                file_exists = os.path.exists(output_csv) and os.path.getsize(output_csv) > 0
+                existing_leads.add(key)
                 
-                # Save to output file with retries for PermissionError
-                for attempt in range(20):
-                    try:
-                        with open(output_csv, mode="a", newline="", encoding="utf-8-sig") as f:
-                            writer = csv.DictWriter(f, fieldnames=fieldnames)
-                            if not file_exists:
-                                writer.writeheader()
-                                file_exists = True
-                            writer.writerow(row_data)
-                        break
-                    except PermissionError:
-                        if attempt == 0:
-                            print(f"\n[Warning] Permission denied writing to '{output_csv}'. Is the file open in Excel? Please close it to save. Retrying every 3s...")
-                        await asyncio.sleep(3)
-                        
-                await asyncio.sleep(1)
+                # Queue the full lead details for enrichment
+                await enrichment_queue.put(item)
                 
-        print(f"Region '{region}' complete. Leads appended directly to '{output_csv}'.")
+            print(f"Region '{region}' scraping complete. Saved to CSV and queued for enrichment.")
+            
+            # Save checkpoint progress
+            completed_regions.add(region)
+            try:
+                with open(checkpoint_file, "w", encoding="utf-8") as f:
+                    json.dump({
+                        "query_type": query_type,
+                        "country": country,
+                        "filter_keywords": filter_keywords,
+                        "regions": regions,
+                        "completed_regions": list(completed_regions)
+                    }, f, indent=4)
+            except Exception as e:
+                print(f"[Warning] Could not save checkpoint: {e}")
+                
+        # Send sentinel to let the consumer know we are done
+        await enrichment_queue.put(None)
+
+    async def enricher_task_worker():
+        """Enriches leads from the queue, crawls websites, calls AI fallback, and updates rows in the CSV in real-time."""
+        fieldnames = ["Business Name", "Phone Number", "Website", "Industry", "Rating", "Review Count", "Email"]
         
-        # Save checkpoint progress
-        completed_regions.add(region)
-        try:
-            with open(checkpoint_file, "w", encoding="utf-8") as f:
-                json.dump({
-                    "query_type": query_type,
-                    "country": country,
-                    "filter_keywords": filter_keywords,
-                    "regions": regions,
-                    "completed_regions": list(completed_regions)
-                }, f, indent=4)
-        except Exception as e:
-            print(f"[Warning] Could not save checkpoint: {e}")
+        async with httpx.AsyncClient(limits=limits) as client:
+            while True:
+                item = await enrichment_queue.get()
+                if item is None:
+                    enrichment_queue.task_done()
+                    break
+                    
+                name = item.get("Business Name", "")
+                website = item.get("Website", "")
+                phone = item.get("Phone Number", "")
+                
+                print(f"  [Enrichment] Processing: '{name}'")
+                
+                # Crawl Website First
+                emails_found = []
+                if website and pd.notna(website) and website.strip():
+                    try:
+                        emails_found = await scrape_emails_for_site(client, website)
+                    except Exception as e:
+                        print(f"    => Crawl error for '{name}': {e}")
+                        
+                resolved_email = "NOT_FOUND"
+                if emails_found:
+                    resolved_email = emails_found[0]
+                    print(f"    => Found Email via crawl: {resolved_email}")
+                else:
+                    if api_key:
+                        # Fallback to AI Nemotron
+                        addr1 = str(item.get("Address Line 1", "")) if pd.notna(item.get("Address Line 1")) else ""
+                        addr2 = str(item.get("Address Line 2", "")) if pd.notna(item.get("Address Line 2")) else ""
+                        address = f"{addr1} {addr2}".strip()
+                        
+                        try:
+                            ai_email = await query_nemotron_async(client, name, website, phone, address)
+                            if ai_email and ai_email != "NOT_FOUND":
+                                resolved_email = ai_email
+                                print(f"    => Inferred Email via AI: {resolved_email}")
+                            else:
+                                print(f"    => Email NOT_FOUND via AI fallback for '{name}'")
+                        except Exception as e:
+                            print(f"    => AI error for '{name}': {e}")
+                    else:
+                        print(f"    => Email NOT_FOUND (AI key not set) for '{name}'")
+                        
+                # Safely update the CSV file in real-time
+                async with csv_lock:
+                    for attempt in range(20):
+                        try:
+                            # 1. Read all existing rows
+                            rows = []
+                            if os.path.exists(output_csv) and os.path.getsize(output_csv) > 0:
+                                with open(output_csv, mode="r", encoding="utf-8-sig") as f:
+                                    reader = csv.DictReader(f)
+                                    for row in reader:
+                                        rows.append(row)
+                            
+                            # 2. Update the target row matching Name and Phone
+                            updated = False
+                            for row in rows:
+                                row_name = str(row.get("Business Name", "")).strip().lower()
+                                row_phone = str(row.get("Phone Number", "")).strip().lower()
+                                target_name = name.strip().lower()
+                                target_phone = phone.strip().lower()
+                                
+                                if row_phone.endswith(".0"):
+                                    row_phone = row_phone[:-2]
+                                if target_phone.endswith(".0"):
+                                    target_phone = target_phone[:-2]
+                                    
+                                if row_name == target_name and row_phone == target_phone:
+                                    row["Email"] = resolved_email
+                                    updated = True
+                                    break
+                                    
+                            # 3. Write back all rows
+                            if updated and rows:
+                                with open(output_csv, mode="w", newline="", encoding="utf-8-sig") as f:
+                                    writer = csv.DictWriter(f, fieldnames=fieldnames)
+                                    writer.writeheader()
+                                    writer.writerows(rows)
+                            break
+                        except PermissionError:
+                            if attempt == 0:
+                                print(f"[Warning] Permission denied. Close the file if open in Excel. Retrying email update...")
+                            await asyncio.sleep(2)
+                            
+                enrichment_queue.task_done()
+                await asyncio.sleep(0.5)
+
+    # Run both scraper and enricher tasks concurrently
+    scraper_task = asyncio.create_task(scraper_task_worker())
+    enricher_task = asyncio.create_task(enricher_task_worker())
+
+    await asyncio.gather(scraper_task, enricher_task)
         
     print(f"\nPipeline complete! Output saved to '{output_csv}'.")
     
@@ -377,4 +472,7 @@ async def main():
             print(f"[Warning] Could not remove checkpoint file: {e}")
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        print("\n[Info] Pipeline interrupted by user. Progress saved.")
