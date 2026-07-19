@@ -25,7 +25,7 @@ async def scroll_feed(page, feed_locator):
             
     print("Finished scrolling results panel.")
 
-async def scrape_query_stealth(page, query):
+async def scrape_query_stealth(page, query, running_event=None, exit_event=None):
     """Search Google Maps and scrape listings by clicking them sequentially in the sidebar."""
     search_url = f"https://www.google.com/maps/search/{query.replace(' ', '+')}/"
     print(f"Navigating to: {search_url}")
@@ -75,6 +75,15 @@ async def scrape_query_stealth(page, query):
     results = []
     
     for idx, url in enumerate(urls):
+        if exit_event and exit_event.is_set():
+            break
+        if running_event and not running_event.is_set():
+            print(f"\n[Scraper] Paused. Waiting to resume...")
+            await running_event.wait()
+            if exit_event and exit_event.is_set():
+                break
+            print(f"[Scraper] Resuming...")
+
         try:
             # Locate the link element in JS to avoid CSS escaping issues
             element_handle = await page.evaluate_handle(

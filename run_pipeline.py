@@ -1,4 +1,5 @@
 import os
+import threading
 import re
 import csv
 import sys
@@ -244,11 +245,76 @@ async def main():
     enrichment_queue = asyncio.Queue(maxsize=100)
     csv_lock = asyncio.Lock()
 
+    running_event = asyncio.Event()
+    running_event.set()
+    exit_event = asyncio.Event()
+
+    def console_listener(loop):
+        print("\n====================================================")
+        print(" [Control] Interactive Control Active!")
+        print(" Commands:")
+        print("  - 'pause' (or 'p') : Pause both workers simultaneously")
+        print("  - 'resume' (or 'r'): Resume processing from where it was left")
+        print("  - 'status' (or 's'): Check current progress")
+        print("  - 'exit' (or 'q')  : Safely stop pipeline and save checkpoint")
+        print("====================================================\n")
+        
+        while not exit_event.is_set():
+            try:
+                cmd = sys.stdin.readline().strip().lower()
+                if not cmd:
+                    continue
+                if cmd in ('pause', 'p'):
+                    if running_event.is_set():
+                        print("\n[Control] Pausing workers... (They will pause at the next safe boundary)")
+                        loop.call_soon_threadsafe(running_event.clear)
+                    else:
+                        print("\n[Control] Pipeline is already paused.")
+                elif cmd in ('resume', 'r'):
+                    if not running_event.is_set():
+                        print("\n[Control] Resuming workers...")
+                        loop.call_soon_threadsafe(running_event.set)
+                    else:
+                        print("\n[Control] Pipeline is already running.")
+                elif cmd in ('status', 's'):
+                    state_str = "RUNNING" if running_event.is_set() else "PAUSED"
+                    print(f"\n[Status] Current Progress:")
+                    print(f"  - Completed regions: {len(completed_regions)} / {len(regions)}")
+                    print(f"  - Unique leads collected: {len(existing_leads)}")
+                    print(f"  - Leads waiting for enrichment: {enrichment_queue.qsize()}")
+                    print(f"  - Pipeline State: {state_str}")
+                elif cmd in ('exit', 'q'):
+                    print("\n[Control] Shutting down pipeline safely...")
+                    loop.call_soon_threadsafe(exit_event.set)
+                    loop.call_soon_threadsafe(running_event.set)
+                    asyncio.run_coroutine_threadsafe(enrichment_queue.put(None), loop)
+                    break
+                else:
+                    print(f"\n[Control] Unknown command: '{cmd}'. Commands: pause (p), resume (r), status (s), exit (q)")
+            except Exception as e:
+                print(f"\n[Control] Listener error: {e}")
+                break
+
+    main_loop = asyncio.get_running_loop()
+    listener_thread = threading.Thread(target=console_listener, args=(main_loop,), daemon=True)
+    listener_thread.start()
+
     async def scraper_task_worker():
         """Scrapes Google Maps regions, filters them, writes them immediately to CSV (empty email), and enqueues them."""
         fieldnames = ["Business Name", "Phone Number", "Website", "Industry", "Rating", "Review Count", "Email"]
         
         for r_idx, region in enumerate(regions):
+            if exit_event.is_set():
+                break
+
+            # Pause check before starting a new region
+            if not running_event.is_set():
+                print(f"\n[Scraper] Paused. Waiting to resume...")
+                await running_event.wait()
+                if exit_event.is_set():
+                    break
+                print(f"[Scraper] Resuming on region: {region}")
+
             if region in completed_regions:
                 print(f"Skipping completed region [{r_idx+1}/{len(regions)}]: {region}")
                 continue
@@ -267,7 +333,7 @@ async def main():
                         args=["--disable-gpu", "--no-sandbox"]
                     )
                     context = await browser.new_page()
-                    raw_listings = await scrape_query_stealth(context, search_query)
+                    raw_listings = await scrape_query_stealth(context, search_query, running_event=running_event, exit_event=exit_event)
                     await browser.close()
             except Exception as e:
                 print(f"Error scraping region '{region}': {e}")
@@ -295,6 +361,8 @@ async def main():
             
             # Write leads immediately to CSV (with empty email) and enqueue them
             for idx, item in enumerate(raw_listings):
+                if exit_event.is_set():
+                    break
                 name = item.get("Business Name", "")
                 phone = item.get("Phone Number", "")
                 category = item.get("Industry", "")
@@ -369,6 +437,17 @@ async def main():
         
         async with httpx.AsyncClient(limits=limits) as client:
             while True:
+                if exit_event.is_set():
+                    break
+
+                # Pause check before fetching the next item
+                if not running_event.is_set():
+                    print(f"\n[Enricher] Paused. Waiting to resume...")
+                    await running_event.wait()
+                    if exit_event.is_set():
+                        break
+                    print(f"[Enricher] Resuming enrichment worker...")
+
                 item = await enrichment_queue.get()
                 if item is None:
                     enrichment_queue.task_done()

@@ -59,9 +59,14 @@ If you are on a fresh Windows machine, open **PowerShell** and run these command
    ```
 
 7. **Run the lead scraper pipeline**:
-   ```powershell
-   python run_pipeline.py
-   ```
+   * **If running globally on this machine (recommended):**
+     ```powershell
+     & C:\Users\maitr\AppData\Local\Programs\Python\Python311\python.exe run_pipeline.py
+     ```
+   * **If running inside an activated virtual environment (`.venv`):**
+     ```powershell
+     python run_pipeline.py
+     ```
 
 ---
 
@@ -131,9 +136,14 @@ The AI fallback email search uses the `nvidia/nemotron-3-nano-omni-30b-a3b-reaso
 
 1. Open your terminal in the directory where the scripts are saved.
 2. Run the pipeline script:
-   ```bash
-   python run_pipeline.py
-   ```
+   * **On Windows (Global Python 3.11 environment):**
+     ```powershell
+     & C:\Users\maitr\AppData\Local\Programs\Python\Python311\python.exe run_pipeline.py
+     ```
+   * **Within an activated virtual environment or other OS:**
+     ```bash
+     python run_pipeline.py
+     ```
 3. Answer the interactive prompts:
    ```text
    ====================================================
@@ -146,6 +156,16 @@ The AI fallback email search uses the `nvidia/nemotron-3-nano-omni-30b-a3b-reaso
     ```
    > [!IMPORTANT]
    > **Category Filter Keywords Warning**: Always use **singular** keywords (e.g., `broker`, `dentist`, `finance`) rather than plural words (`brokers`, `dentists`). Since Google Maps categories are singular (e.g., `"Finance broker"`), using a plural keyword will filter out 100% of the leads, resulting in an empty output file. Alternatively, press **Enter** to skip filtering.
+---
+
+### 🕹️ Interactive Control Commands
+
+While the pipeline is running, you can control the execution of both concurrent workers by typing commands directly into the terminal and pressing **Enter**:
+
+* **`pause`** (or **`p`**): Pauses both the Playwright Scraper and the AI Email Enricher workers simultaneously at the next safe boundary.
+* **`resume`** (or **`r`**): Resumes the pipeline workers from where they were paused.
+* **`status`** (or **`s`**): Prints the current real-time progress (completed regions, total unique leads collected, queue size, and running/paused state).
+* **`exit`** (or **`q`**): Safely halts both workers and saves the checkpoint data to resume later.
 
 ---
 
