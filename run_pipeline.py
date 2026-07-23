@@ -261,7 +261,11 @@ async def main():
         
         while not exit_event.is_set():
             try:
-                cmd = sys.stdin.readline().strip().lower()
+                raw_line = sys.stdin.readline()
+                if raw_line == "":
+                    # EOF reached on stdin (non-interactive or redirected input)
+                    break
+                cmd = raw_line.strip().lower()
                 if not cmd:
                     continue
                 if cmd in ('pause', 'p'):
@@ -303,133 +307,143 @@ async def main():
         """Scrapes Google Maps regions, filters them, writes them immediately to CSV (empty email), and enqueues them."""
         fieldnames = ["Business Name", "Phone Number", "Website", "Industry", "Rating", "Review Count", "Email"]
         
-        for r_idx, region in enumerate(regions):
-            if exit_event.is_set():
-                break
+        try:
+            async with async_playwright() as p:
+                browser = await p.chromium.launch(
+                    headless=True,
+                    args=["--disable-gpu", "--no-sandbox"]
+                )
+                context = await browser.new_context(
+                    user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+                )
+                page = await context.new_page()
 
-            # Pause check before starting a new region
-            if not running_event.is_set():
-                print(f"\n[Scraper] Paused. Waiting to resume...")
-                await running_event.wait()
-                if exit_event.is_set():
-                    break
-                print(f"[Scraper] Resuming on region: {region}")
+                for r_idx, region in enumerate(regions):
+                    if exit_event.is_set():
+                        break
 
-            if region in completed_regions:
-                print(f"Skipping completed region [{r_idx+1}/{len(regions)}]: {region}")
-                continue
-                
-            print(f"\n====================================================")
-            print(f" [{r_idx+1}/{len(regions)}] REGION: {region}")
-            print(f"====================================================")
-            
-            search_query = f"{query_type} in {region}"
-            
-            print(f"Step 1: Scraping Google Maps for '{search_query}'...")
-            try:
-                async with async_playwright() as p:
-                    browser = await p.chromium.launch(
-                        headless=True,
-                        args=["--disable-gpu", "--no-sandbox"]
-                    )
-                    context = await browser.new_page()
-                    raw_listings = await scrape_query_stealth(context, search_query, running_event=running_event, exit_event=exit_event)
-                    await browser.close()
-            except Exception as e:
-                print(f"Error scraping region '{region}': {e}")
-                raw_listings = []
-                
-            if not raw_listings:
-                print(f"No listings found on Google Maps for '{region}'. Moving to next region.")
-                # Save checkpoint progress so we skip this region next time
-                completed_regions.add(region)
-                try:
-                    with open(checkpoint_file, "w", encoding="utf-8") as f:
-                        json.dump({
-                            "query_type": query_type,
-                            "country": country,
-                            "filter_keywords": filter_keywords,
-                            "regions": regions,
-                            "completed_regions": list(completed_regions)
-                        }, f, indent=4)
-                except Exception as e:
-                    print(f"[Warning] Could not save checkpoint: {e}")
-                continue
-                
-            print(f"Scraped {len(raw_listings)} raw listings in '{region}'.")
-            print(f"Step 2: Filtering leads and writing to CSV in real-time...")
-            
-            # Write leads immediately to CSV (with empty email) and enqueue them
-            for idx, item in enumerate(raw_listings):
-                if exit_event.is_set():
-                    break
-                name = item.get("Business Name", "")
-                phone = item.get("Phone Number", "")
-                category = item.get("Industry", "")
-                website = item.get("Website", "")
-                
-                # Deduplicate
-                key = (name.strip().lower(), phone.strip().lower())
-                if key in existing_leads:
-                    continue
-                    
-                # Filter Category
-                if filter_keywords and category:
-                    category_lower = category.lower()
-                    if not any(kw in category_lower for kw in filter_keywords):
-                        continue
-                
-                # Prepare row data with empty email
-                cols_to_drop = ["Address Line 1", "Address Line 2", "Google Maps Link"]
-                cleaned_lead = {k: v for k, v in item.items() if k not in cols_to_drop}
-                cleaned_lead["Email"] = ""
-                
-                row_data = {field: str(cleaned_lead.get(field, "")).strip() for field in fieldnames}
-                if row_data["Rating"] in ("nan", "None"):
-                    row_data["Rating"] = ""
-                if row_data["Review Count"] in ("nan", "None"):
-                    row_data["Review Count"] = ""
-                    
-                # Write immediately to CSV using the lock
-                async with csv_lock:
-                    file_exists = os.path.exists(output_csv) and os.path.getsize(output_csv) > 0
-                    for attempt in range(20):
-                        try:
-                            with open(output_csv, mode="a", newline="", encoding="utf-8-sig") as f:
-                                writer = csv.DictWriter(f, fieldnames=fieldnames)
-                                if not file_exists:
-                                    writer.writeheader()
-                                    file_exists = True
-                                writer.writerow(row_data)
+                    # Pause check before starting a new region
+                    if not running_event.is_set():
+                        print(f"\n[Scraper] Paused. Waiting to resume...")
+                        await running_event.wait()
+                        if exit_event.is_set():
                             break
-                        except PermissionError:
-                            if attempt == 0:
-                                print(f"[Warning] Permission denied writing to '{output_csv}'. Is it open in Excel? Retrying...")
-                            await asyncio.sleep(3)
-                
-                existing_leads.add(key)
-                
-                # Queue the full lead details for enrichment
-                await enrichment_queue.put(item)
-                
-            print(f"Region '{region}' scraping complete. Saved to CSV and queued for enrichment.")
-            
-            # Save checkpoint progress
-            completed_regions.add(region)
-            try:
-                with open(checkpoint_file, "w", encoding="utf-8") as f:
-                    json.dump({
-                        "query_type": query_type,
-                        "country": country,
-                        "filter_keywords": filter_keywords,
-                        "regions": regions,
-                        "completed_regions": list(completed_regions)
-                    }, f, indent=4)
-            except Exception as e:
-                print(f"[Warning] Could not save checkpoint: {e}")
-                
-        # Send sentinel to let the consumer know we are done
-        await enrichment_queue.put(None)
+                        print(f"[Scraper] Resuming on region: {region}")
+
+                    if region in completed_regions:
+                        print(f"Skipping completed region [{r_idx+1}/{len(regions)}]: {region}")
+                        continue
+                        
+                    print(f"\n====================================================")
+                    print(f" [{r_idx+1}/{len(regions)}] REGION: {region}")
+                    print(f"====================================================")
+                    
+                    search_query = f"{query_type} in {region}"
+                    
+                    print(f"Step 1: Scraping Google Maps for '{search_query}'...")
+                    try:
+                        raw_listings = await scrape_query_stealth(page, search_query, running_event=running_event, exit_event=exit_event)
+                    except Exception as e:
+                        print(f"Error scraping region '{region}': {e}")
+                        raw_listings = []
+                        
+                    if not raw_listings:
+                        print(f"No listings found on Google Maps for '{region}'. Moving to next region.")
+                        # Save checkpoint progress so we skip this region next time
+                        completed_regions.add(region)
+                        try:
+                            with open(checkpoint_file, "w", encoding="utf-8") as f:
+                                json.dump({
+                                    "query_type": query_type,
+                                    "country": country,
+                                    "filter_keywords": filter_keywords,
+                                    "regions": regions,
+                                    "completed_regions": list(completed_regions)
+                                }, f, indent=4)
+                        except Exception as e:
+                            print(f"[Warning] Could not save checkpoint: {e}")
+                        continue
+                        
+                    print(f"Scraped {len(raw_listings)} raw listings in '{region}'.")
+                    print(f"Step 2: Filtering leads and writing to CSV in real-time...")
+                    
+                    # Write leads immediately to CSV (with empty email) and enqueue them
+                    for idx, item in enumerate(raw_listings):
+                        if exit_event.is_set():
+                            break
+                        name = item.get("Business Name", "")
+                        phone = item.get("Phone Number", "")
+                        category = item.get("Industry", "")
+                        website = item.get("Website", "")
+                        
+                        # Deduplicate
+                        key = (name.strip().lower(), phone.strip().lower())
+                        if key in existing_leads:
+                            continue
+                            
+                        # Filter Category
+                        if filter_keywords and category:
+                            category_lower = category.lower()
+                            if not any(kw in category_lower for kw in filter_keywords):
+                                continue
+                        
+                        # Prepare row data with empty email
+                        cols_to_drop = ["Address Line 1", "Address Line 2", "Google Maps Link"]
+                        cleaned_lead = {k: v for k, v in item.items() if k not in cols_to_drop}
+                        cleaned_lead["Email"] = ""
+                        
+                        row_data = {field: str(cleaned_lead.get(field, "")).strip() for field in fieldnames}
+                        if row_data["Rating"] in ("nan", "None"):
+                            row_data["Rating"] = ""
+                        if row_data["Review Count"] in ("nan", "None"):
+                            row_data["Review Count"] = ""
+                            
+                        # Write immediately to CSV using the lock
+                        async with csv_lock:
+                            file_exists = os.path.exists(output_csv) and os.path.getsize(output_csv) > 0
+                            for attempt in range(20):
+                                try:
+                                    with open(output_csv, mode="a", newline="", encoding="utf-8-sig") as f:
+                                        writer = csv.DictWriter(f, fieldnames=fieldnames)
+                                        if not file_exists:
+                                            writer.writeheader()
+                                            file_exists = True
+                                        writer.writerow(row_data)
+                                    break
+                                except PermissionError:
+                                    if attempt == 0:
+                                        print(f"[Warning] Permission denied writing to '{output_csv}'. Is it open in Excel? Retrying...")
+                                    await asyncio.sleep(3)
+                        
+                        existing_leads.add(key)
+                        
+                        # Queue the full lead details for enrichment
+                        await enrichment_queue.put(item)
+                        
+                    print(f"Region '{region}' scraping complete. Saved to CSV and queued for enrichment.")
+                    
+                    # Save checkpoint progress
+                    completed_regions.add(region)
+                    try:
+                        with open(checkpoint_file, "w", encoding="utf-8") as f:
+                            json.dump({
+                                "query_type": query_type,
+                                "country": country,
+                                "filter_keywords": filter_keywords,
+                                "regions": regions,
+                                "completed_regions": list(completed_regions)
+                            }, f, indent=4)
+                    except Exception as e:
+                        print(f"[Warning] Could not save checkpoint: {e}")
+                        
+                    await asyncio.sleep(3)
+
+                await browser.close()
+        except Exception as e:
+            print(f"Fatal error in scraper task worker: {e}")
+        finally:
+            # Send sentinel to let the consumer know we are done
+            await enrichment_queue.put(None)
 
     async def enricher_task_worker():
         """Enriches leads from the queue, crawls websites, calls AI fallback, and updates rows in the CSV in real-time."""
